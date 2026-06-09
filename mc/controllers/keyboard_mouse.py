@@ -1,5 +1,6 @@
 from typing import Set, Tuple
 
+from pyglet.event import EVENT_HANDLED
 from pyglet.window import key, mouse
 
 from mc.controllers import PlayerController
@@ -59,6 +60,7 @@ class KeyboardMouseController(PlayerController):
             self._actions.add('jump')
         elif symbol == key.ESCAPE:
             self._actions.add('escape')
+            return EVENT_HANDLED  # prevent default close
         elif symbol == key.TAB:
             self._actions.add('fly_toggle')
         elif symbol in _NUM_KEYS:
@@ -84,6 +86,8 @@ class KeyboardMouseController(PlayerController):
                 self._actions.add('place_block')
             elif button == mouse.LEFT:
                 self._actions.add('break_block')
+            elif button == mouse.MIDDLE:
+                self._actions.add('pick_block')
         else:
             self._exclusive = True
             self._window.set_exclusive_mouse(True)

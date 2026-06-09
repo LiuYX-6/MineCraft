@@ -5,12 +5,12 @@ from pyglet.gl import (GL_LINES, GL_CULL_FACE, GL_TEXTURE_2D,
                         GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
                         GL_NEAREST, GL_DEPTH_TEST,
                         glClearColor, glEnable, glDisable, glViewport,
-                        glTexParameteri)
+                        glLineWidth, glTexParameteri)
 from pyglet.math import Mat4, Vec3
 
 from mc.config import TICKS_PER_SEC
 from mc.shaders import create_line_shader
-from mc.utils import wireframe_cube_vertices, sectorize
+from mc.utils import sectorize, visible_block_edges
 from mc.blocks import STONE
 from mc.world import World
 from mc.player import Player
@@ -123,7 +123,10 @@ class GameWindow(pyglet.window.Window):
             elif action == 'fly_toggle':
                 self.player.toggle_flying()
             elif action == 'escape':
-                self.controller.deactivate()
+                if self.controller.exclusive:
+                    self.controller.deactivate()   # 1st press: release mouse
+                else:
+                    self.close()                    # 2nd press: quit game
             elif action == 'place_block':
                 vector = self.player.get_sight_vector()
                 block, previous = self.world.hit_test(
@@ -139,6 +142,14 @@ class GameWindow(pyglet.window.Window):
                     texture = self.world.world[block]
                     if texture != STONE:
                         self.world.remove_block(block)
+            elif action == 'pick_block':
+                vector = self.player.get_sight_vector()
+                block, _ = self.world.hit_test(
+                    self.player.position, vector, max_distance=4)
+                if block and block in self.world.world:
+                    texture = self.world.world[block]
+                    self.player.inventory[
+                        self.player.selected_block_index] = texture
             elif action.startswith('slot_'):
                 index = int(action.split('_')[1])
                 self.player.switch_slot(index)
@@ -149,20 +160,8 @@ class GameWindow(pyglet.window.Window):
 
     def on_resize(self, width, height):
         """Re-position the HUD label and recreate the reticle."""
-        # Label
         self.label.y = height - 10
-        # Reticle
-        if self.reticle:
-            self.reticle.delete()
-        x, y = self.width // 2, self.height // 2
-        n = 10
-        self.reticle = self.line_shader.vertex_list(
-            4, GL_LINES,
-            position=('f', (float(x - n), float(y), 0.0,
-                            float(x + n), float(y), 0.0,
-                            float(x), float(y - n), 0.0,
-                            float(x), float(y + n), 0.0))
-        )
+        self._create_reticle()
 
     # ------------------------------------------------------------------
     # Rendering — 2D / 3D setup
@@ -223,15 +222,23 @@ class GameWindow(pyglet.window.Window):
         self.draw_reticle()
 
     def draw_focused_block(self):
-        """Draw a wireframe outline around the block under the crosshairs."""
+        """Draw visible-face edges around the block under the crosshairs.
+
+        Only faces that are front-facing AND not covered by a neighbouring
+        block are drawn.  Outline is suppressed when the block is too far
+        from the player.
+        """
         vector = self.player.get_sight_vector()
         block = self.world.hit_test(self.player.position, vector)[0]
         if block:
             x, y, z = block
-            # Generate line-segment vertices for the 12 edges of the cube
-            wireframe_data = wireframe_cube_vertices(x, y, z, 0.51)
-            # Use the line shader with the 3D view-projection matrix
+            wireframe_data = visible_block_edges(
+                x, y, z, 0.51, self.world.world,
+                self.player.position, max_distance=4)
+            if not wireframe_data:
+                return
             mvp = self.projection @ self.view
+            self.line_shader.use()
             self.line_shader['mvp'] = mvp
             self.line_shader['color'] = (0.0, 0.0, 0.0, 1.0)
             count = len(wireframe_data) // 3
@@ -250,12 +257,30 @@ class GameWindow(pyglet.window.Window):
             len(self.world._shown), len(self.world.world))
         self.label.draw()
 
+    def _create_reticle(self):
+        """Create or recreate the crosshair vertex list."""
+        if self.reticle:
+            self.reticle.delete()
+        x, y = self.width // 2, self.height // 2
+        n = 10
+        self.reticle = self.line_shader.vertex_list(
+            4, GL_LINES,
+            position=('f', (float(x - n), float(y), 0.0,
+                            float(x + n), float(y), 0.0,
+                            float(x), float(y - n), 0.0,
+                            float(x), float(y + n), 0.0))
+        )
+
     def draw_reticle(self):
         """Draw the crosshair reticle at the centre of the screen."""
-        mvp = self.projection @ self.view
-        self.line_shader['mvp'] = mvp
-        self.line_shader['color'] = (0.0, 0.0, 0.0, 1.0)
+        if self.reticle is None:
+            self._create_reticle()
+        self.line_shader.use()
+        self.line_shader['mvp'] = self.projection @ self.view
+        self.line_shader['color'] = (1.0, 1.0, 1.0, 1.0)
+        glLineWidth(2.0)
         self.reticle.draw(GL_LINES)
+        glLineWidth(1.0)
 
 
 # ------------------------------------------------------------------

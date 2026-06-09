@@ -40,6 +40,7 @@ class PlayerController(ABC):
         * ``'break_block'`` — break a block
         * ``'escape'`` — release mouse / exit
         * ``'slot_0'`` … ``'slot_9'`` — switch hotbar slot
+        * ``'pick_block'`` — pick the focused block type (middle-click)
         """
         ...
 
