@@ -1,20 +1,16 @@
 import math
 
 import pyglet
-from pyglet.gl import (GL_QUADS, GL_LINES, GL_FOG, GL_FOG_COLOR, GL_FOG_HINT,
-                        GL_FOG_MODE, GL_FOG_START, GL_FOG_END, GL_DONT_CARE,
-                        GL_LINEAR, GL_CULL_FACE, GL_TEXTURE_2D,
+from pyglet.gl import (GL_LINES, GL_CULL_FACE, GL_TEXTURE_2D,
                         GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
-                        GL_NEAREST, GL_DEPTH_TEST, GL_FRONT_AND_BACK,
-                        GL_LINE, GL_FILL,
-                        GL_PROJECTION, GL_MODELVIEW,
-                        GLfloat,
+                        GL_NEAREST, GL_DEPTH_TEST,
                         glClearColor, glEnable, glDisable, glViewport,
-                        glMatrixMode, glLoadIdentity, glOrtho, gluPerspective,
-                        glRotatef, glTranslatef, glColor3d, glPolygonMode,
-                        glTexParameteri, glFogfv, glFogi, glFogf, glHint)
+                        glTexParameteri)
+from pyglet.math import Mat4, Vec3
+
 from mc.config import TICKS_PER_SEC
-from mc.utils import cube_vertices, sectorize
+from mc.shaders import create_line_shader
+from mc.utils import wireframe_cube_vertices, sectorize
 from mc.blocks import STONE
 from mc.world import World
 from mc.player import Player
@@ -47,6 +43,13 @@ class GameWindow(pyglet.window.Window):
         # ---- Per-frame state ----
         # Which sector the player is currently in (for sector-change detection).
         self.sector = None
+        # Manual FPS counter (pyglet 2.x removed clock.get_fps).
+        self._fps = 0
+        self._frames = 0
+        self._fps_time = 0.0
+
+        # ---- Line shader (for reticle and wireframe highlight) ----
+        self.line_shader = create_line_shader()
 
         # ---- HUD elements ----
         # FPS / position label (top-left).
@@ -73,6 +76,14 @@ class GameWindow(pyglet.window.Window):
         5. Advance player physics (movement, gravity, collision).
         6. Apply camera-rotation delta from the controller.
         """
+        # 0. Manual FPS counting.
+        self._frames += 1
+        self._fps_time += dt
+        if self._fps_time >= 0.5:
+            self._fps = self._frames / self._fps_time
+            self._frames = 0
+            self._fps_time = 0.0
+
         # 1. Process deferred render queue.
         self.world.process_queue()
 
@@ -145,8 +156,12 @@ class GameWindow(pyglet.window.Window):
             self.reticle.delete()
         x, y = self.width // 2, self.height // 2
         n = 10
-        self.reticle = pyglet.graphics.vertex_list(4,
-            ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n))
+        self.reticle = self.line_shader.vertex_list(
+            4, GL_LINES,
+            position=('f', (float(x - n), float(y), 0.0,
+                            float(x + n), float(y), 0.0,
+                            float(x), float(y - n), 0.0,
+                            float(x), float(y + n), 0.0))
         )
 
     # ------------------------------------------------------------------
@@ -157,13 +172,12 @@ class GameWindow(pyglet.window.Window):
         """Configure OpenGL for 2D (HUD) drawing."""
         width, height = self.get_size()
         glDisable(GL_DEPTH_TEST)
-        viewport = self.get_viewport_size()
+        viewport = self.get_framebuffer_size()
         glViewport(0, 0, max(1, viewport[0]), max(1, viewport[1]))
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        glOrtho(0, max(1, width), 0, max(1, height), -1, 1)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        # Orthographic projection matching window pixel coordinates
+        self.projection = Mat4.orthogonal_projection(
+            0, max(1, width), 0, max(1, height), -1, 1)
+        self.view = Mat4()
 
     def set_3d(self):
         """Configure OpenGL for 3D (world) drawing.
@@ -172,19 +186,21 @@ class GameWindow(pyglet.window.Window):
         """
         width, height = self.get_size()
         glEnable(GL_DEPTH_TEST)
-        viewport = self.get_viewport_size()
+        viewport = self.get_framebuffer_size()
         glViewport(0, 0, max(1, viewport[0]), max(1, viewport[1]))
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(65.0, width / float(height), 0.1, 60.0)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        # Perspective projection
+        self.projection = Mat4.perspective_projection(
+            max(1, width) / max(1, height), 0.1, 60.0, fov=65.0)
+        # View matrix: rotate (yaw around Y, pitch around camera right) then
+        # translate.  angles are in degrees; Mat4.from_rotation expects radians.
         x, y = self.player.rotation
-        glRotatef(x, 0, 1, 0)
-        glRotatef(-y, math.cos(math.radians(x)), 0,
-                  math.sin(math.radians(x)))
-        x, y, z = self.player.position
-        glTranslatef(-x, -y, -z)
+        x_rad, y_rad = math.radians(x), math.radians(y)
+        # Camera right axis in world space (depends on yaw)
+        right = (math.cos(x_rad), 0.0, math.sin(x_rad))
+        self.view = (Mat4.from_rotation(x_rad, (0, 1, 0)) @
+                     Mat4.from_rotation(-y_rad, right))
+        px, py, pz = self.player.position
+        self.view = self.view @ Mat4.from_translation(Vec3(-px, -py, -pz))
 
     # ------------------------------------------------------------------
     # Rendering — draw callbacks
@@ -194,7 +210,12 @@ class GameWindow(pyglet.window.Window):
         """Called by pyglet to render the full frame."""
         self.clear()
         self.set_3d()
-        glColor3d(1, 1, 1)
+
+        # Update block shader uniforms
+        mvp = self.projection @ self.view
+        self.world.shader['mvp'] = mvp
+        self.world.shader['view'] = self.view
+
         self.world.batch.draw()
         self.draw_focused_block()
         self.set_2d()
@@ -207,23 +228,33 @@ class GameWindow(pyglet.window.Window):
         block = self.world.hit_test(self.player.position, vector)[0]
         if block:
             x, y, z = block
-            vertex_data = cube_vertices(x, y, z, 0.51)
-            glColor3d(0, 0, 0)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            pyglet.graphics.draw(24, GL_QUADS, ('v3f/static', vertex_data))
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            # Generate line-segment vertices for the 12 edges of the cube
+            wireframe_data = wireframe_cube_vertices(x, y, z, 0.51)
+            # Use the line shader with the 3D view-projection matrix
+            mvp = self.projection @ self.view
+            self.line_shader['mvp'] = mvp
+            self.line_shader['color'] = (0.0, 0.0, 0.0, 1.0)
+            count = len(wireframe_data) // 3
+            vl = self.line_shader.vertex_list(
+                count, GL_LINES,
+                position=('f', wireframe_data)
+            )
+            vl.draw(GL_LINES)
+            vl.delete()
 
     def draw_label(self):
         """Draw the FPS / position / block-count label (top-left)."""
         x, y, z = self.player.position
         self.label.text = '%02d (%.2f, %.2f, %.2f) %d / %d' % (
-            pyglet.clock.get_fps(), x, y, z,
+            self._fps, x, y, z,
             len(self.world._shown), len(self.world.world))
         self.label.draw()
 
     def draw_reticle(self):
         """Draw the crosshair reticle at the centre of the screen."""
-        glColor3d(0, 0, 0)
+        mvp = self.projection @ self.view
+        self.line_shader['mvp'] = mvp
+        self.line_shader['color'] = (0.0, 0.0, 0.0, 1.0)
         self.reticle.draw(GL_LINES)
 
 
@@ -231,23 +262,20 @@ class GameWindow(pyglet.window.Window):
 # Module-level OpenGL helpers
 # ------------------------------------------------------------------
 
-def setup_fog():
-    """Configure OpenGL fog properties."""
-    glEnable(GL_FOG)
-    glFogfv(GL_FOG_COLOR, (GLfloat * 4)(0.5, 0.69, 1.0, 1))
-    glHint(GL_FOG_HINT, GL_DONT_CARE)
-    glFogi(GL_FOG_MODE, GL_LINEAR)
-    glFogf(GL_FOG_START, 20.0)
-    glFogf(GL_FOG_END, 60.0)
+def setup_fog(shader):
+    """Set fog parameters on the block shader (replaces fixed-pipeline fog)."""
+    shader['fog_color'] = (0.5, 0.69, 1.0, 1.0)
+    shader['fog_start'] = 20.0
+    shader['fog_end'] = 60.0
 
 
-def setup():
+def setup(shader):
     """Basic OpenGL configuration (call after window creation)."""
     glClearColor(0.5, 0.69, 1.0, 1)
     glEnable(GL_CULL_FACE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-    setup_fog()
+    setup_fog(shader)
 
 
 def run():
@@ -255,5 +283,5 @@ def run():
     window = GameWindow(width=800, height=600, caption='Minecraft',
                         resizable=True)
     window.controller.activate()
-    setup()
+    setup(window.world.shader)
     pyglet.app.run()

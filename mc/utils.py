@@ -39,6 +39,36 @@ def tex_coords(top, bottom, side):
     return result
 
 
+def wireframe_cube_vertices(x, y, z, n):
+    """Return the 24 vertices (12 line segments) for a wireframe cube at
+    position x, y, z with size 2*n.  Suitable for drawing with GL_LINES.
+
+    Each edge is represented by 2 vertices (6 floats each).
+    """
+    # 8 corners of the cube
+    v = [
+        x-n, y+n, z-n,  # 0: top-back-left
+        x-n, y+n, z+n,  # 1: top-front-left
+        x+n, y+n, z+n,  # 2: top-front-right
+        x+n, y+n, z-n,  # 3: top-back-right
+        x-n, y-n, z-n,  # 4: bottom-back-left
+        x+n, y-n, z-n,  # 5: bottom-back-right
+        x+n, y-n, z+n,  # 6: bottom-front-right
+        x-n, y-n, z+n,  # 7: bottom-front-left
+    ]
+    # 12 edges as pairs of corner indices
+    edges = [
+        (0,1), (1,2), (2,3), (3,0),   # top face
+        (4,5), (5,6), (6,7), (7,4),   # bottom face
+        (0,4), (1,7), (2,6), (3,5),   # vertical edges
+    ]
+    result = []
+    for a, b in edges:
+        result.extend(v[a*3:a*3+3])
+        result.extend(v[b*3:b*3+3])
+    return result
+
+
 FACES = [
     ( 0, 1, 0),
     ( 0,-1, 0),

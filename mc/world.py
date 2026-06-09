@@ -2,12 +2,21 @@ import time
 from collections import deque
 
 import pyglet
-from pyglet import image
-from pyglet.gl import GL_QUADS
-from pyglet.graphics import TextureGroup
+from pyglet.gl import GL_TRIANGLES
+from pyglet.image import load as image_load
 
 from mc.config import TICKS_PER_SEC, TEXTURE_PATH, xrange
+from mc.shaders import create_block_shader, ShaderTextureGroup
 from mc.utils import cube_vertices, FACES, normalize, sectorize
+
+# Pre-computed index buffer: converts 24 quad-vertices (4 per face × 6 faces)
+# into 36 triangle indices (2 triangles per face × 6 faces).
+_FACE_INDICES = [0, 1, 2, 0, 2, 3]
+_CUBE_INDICES = []
+for _face in range(6):
+    _offset = _face * 4
+    for _idx in _FACE_INDICES:
+        _CUBE_INDICES.append(_offset + _idx)
 
 
 class World(object):
@@ -22,8 +31,10 @@ class World(object):
         # A Batch is a collection of vertex lists for batched rendering.
         self.batch = pyglet.graphics.Batch()
 
-        # A TextureGroup manages an OpenGL texture.
-        self.group = TextureGroup(image.load(TEXTURE_PATH).get_texture())
+        # Create the block shader and custom group (shader + texture).
+        self.shader = create_block_shader()
+        self.texture = image_load(TEXTURE_PATH).get_texture()
+        self.group = ShaderTextureGroup(self.shader, self.texture)
 
         # A mapping from position to the texture of the block at that position.
         # This defines all the blocks that are currently in the world.
@@ -179,11 +190,14 @@ class World(object):
         x, y, z = position
         vertex_data = cube_vertices(x, y, z, 0.5)
         texture_data = list(texture)
-        # create vertex list
-        # FIXME Maybe `add_indexed()` should be used instead
-        self._shown[position] = self.batch.add(24, GL_QUADS, self.group,
-            ('v3f/static', vertex_data),
-            ('t2f/static', texture_data))
+        # Use indexed drawing with GL_TRIANGLES via the shader
+        self._shown[position] = self.shader.vertex_list_indexed(
+            24, GL_TRIANGLES, _CUBE_INDICES,
+            batch=self.batch,
+            group=self.group,
+            position=('f', vertex_data),
+            tex_coords=('f', texture_data),
+        )
 
     def hide_block(self, position, immediate=True):
         """ Hide the block at the given `position`. Hiding does not remove the
