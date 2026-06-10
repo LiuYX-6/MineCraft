@@ -1,11 +1,12 @@
 import math
 
 import pyglet
-from pyglet.gl import (GL_LINES, GL_CULL_FACE, GL_TEXTURE_2D,
+from pyglet.gl import (GL_LINES, GL_LINE_LOOP, GL_POINTS,
+                        GL_CULL_FACE, GL_TEXTURE_2D,
                         GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
                         GL_NEAREST, GL_DEPTH_TEST,
                         glClearColor, glEnable, glDisable, glViewport,
-                        glLineWidth, glTexParameteri)
+                        glLineWidth, glPointSize, glTexParameteri)
 from pyglet.math import Mat4, Vec3
 
 from mc.config import TICKS_PER_SEC
@@ -121,13 +122,20 @@ class GameWindow(pyglet.window.Window):
             actions |= self.gesture_controller.poll_actions()
         self._handle_actions(actions)
 
-        # 5. Player physics.
-        self.player.update_physics(dt, self.world.world,
-                                    self.controller.get_strafe(),
+        # 5. Player physics — merge keyboard + gesture movement.
+        strafe = self.controller.get_strafe()
+        if self.gesture_controller is not None:
+            gs = self.gesture_controller.get_strafe()
+            strafe = (strafe[0] + gs[0], strafe[1] + gs[1])
+        self.player.update_physics(dt, self.world.world, strafe,
                                     flying=self.player.flying)
 
-        # 6. Camera rotation.
+        # 6. Camera rotation — merge keyboard/mouse + gesture rotation.
         dy, dp = self.controller.get_rotation_delta()
+        if self.gesture_controller is not None:
+            gdy, gdp = self.gesture_controller.get_rotation_delta()
+            dy += gdy
+            dp += gdp
         if dy or dp:
             x, y = self.player.rotation
             x, y = x + dy, y + dp
@@ -243,6 +251,7 @@ class GameWindow(pyglet.window.Window):
         self.set_2d()
         self.draw_label()
         self.draw_reticle()
+        self.draw_gesture_overlay()
 
     def draw_focused_block(self):
         """Draw visible-face edges around the block under the crosshairs.
@@ -314,6 +323,116 @@ class GameWindow(pyglet.window.Window):
         self.line_shader['color'] = (1.0, 1.0, 1.0, 1.0)
         glLineWidth(2.0)
         self.reticle.draw(GL_LINES)
+        glLineWidth(1.0)
+
+    # ------------------------------------------------------------------
+    # Gesture fingertip-displacement widget
+    # ------------------------------------------------------------------
+
+    # Display parameters for the fingertip overlay.
+    _GESTURE_WIDGET_CX = 80.0    # distance from right edge
+    _GESTURE_WIDGET_CY = 80.0    # distance from bottom edge
+    _GESTURE_WIDGET_R = 55.0     # display radius (pixels)
+    # Scale: 0.25 normalised units → widget radius.
+    _GESTURE_DISPLAY_SCALE = 220.0  # px / normalised unit
+
+    @staticmethod
+    def _circle_verts(cx: float, cy: float, r: float, segments: int = 32):
+        """Return a flat list of (x, y, z) vertices for a circle outline."""
+        verts = []
+        for i in range(segments):
+            angle = 2.0 * math.pi * i / segments
+            verts.extend((cx + r * math.cos(angle),
+                          cy + r * math.sin(angle),
+                          0.0))
+        return verts
+
+    def draw_gesture_overlay(self):
+        """Draw fingertip-to-anchor displacement widget (bottom-right).
+
+        Only visible when a gesture control mode is active.
+        """
+        gc = self.gesture_controller
+        if gc is None:
+            return
+        mode = gc.control_mode
+        if mode is None:
+            return
+        anchor = gc.anchor_tip
+        current = gc.current_tip
+        if anchor is None or current is None:
+            return
+
+        cx = self.width - self._GESTURE_WIDGET_CX
+        cy = self._GESTURE_WIDGET_CY
+        scale = self._GESTURE_DISPLAY_SCALE
+        r = self._GESTURE_WIDGET_R
+
+        # Fingertip displacement in display pixels.
+        # (anchor - current) so the indicator dot shows the direction of
+        # the *effect* (natural drag), consistent with the computation.
+        tip_dx = (anchor[0] - current[0]) * scale
+        tip_dy = (anchor[1] - current[1]) * scale
+        dist = math.hypot(tip_dx, tip_dy)
+        if dist > r:
+            tip_dx = tip_dx / dist * r
+            tip_dy = tip_dy / dist * r
+
+        # Mode-dependent colour.
+        if mode == 'rotation':
+            color = (0.0, 0.8, 1.0, 1.0)   # cyan
+        else:
+            color = (1.0, 0.55, 0.0, 1.0)   # orange
+
+        dead_zone_px = max(4.0, 0.005 * scale)
+
+        self.line_shader.use()
+        mvp = self.projection @ self.view
+
+        # --- Max-range circle (grey) ---
+        self.line_shader['mvp'] = mvp
+        self.line_shader['color'] = (0.35, 0.35, 0.35, 1.0)
+        mr_verts = self._circle_verts(cx, cy, r)
+        vl = self.line_shader.vertex_list(
+            len(mr_verts) // 3, GL_LINE_LOOP, position=('f', mr_verts))
+        vl.draw(GL_LINE_LOOP)
+        vl.delete()
+
+        # --- Dead-zone circle (green) ---
+        self.line_shader['color'] = (0.0, 0.7, 0.0, 1.0)
+        dz_verts = self._circle_verts(cx, cy, dead_zone_px)
+        vl = self.line_shader.vertex_list(
+            len(dz_verts) // 3, GL_LINE_LOOP, position=('f', dz_verts))
+        vl.draw(GL_LINE_LOOP)
+        vl.delete()
+
+        # --- Anchor cross (yellow) ---
+        self.line_shader['color'] = (1.0, 0.85, 0.0, 1.0)
+        ch = 6.0
+        cross = (cx - ch, cy, 0.0, cx + ch, cy, 0.0,
+                 cx, cy - ch, 0.0, cx, cy + ch, 0.0)
+        vl = self.line_shader.vertex_list(4, GL_LINES, position=('f', cross))
+        glLineWidth(2.0)
+        vl.draw(GL_LINES)
+        vl.delete()
+
+        # --- Displacement line (mode colour) ---
+        self.line_shader['color'] = color
+        tip_x, tip_y = cx + tip_dx, cy + tip_dy
+        line = (cx, cy, 0.0, tip_x, tip_y, 0.0)
+        vl = self.line_shader.vertex_list(2, GL_LINES, position=('f', line))
+        vl.draw(GL_LINES)
+        vl.delete()
+
+        # --- Current-tip dot (filled via point size) ---
+        self.line_shader['color'] = color
+        dot = (tip_x, tip_y, 0.0)
+        vl = self.line_shader.vertex_list(1, GL_POINTS, position=('f', dot))
+        glPointSize(8.0)
+        vl.draw(GL_POINTS)
+        vl.delete()
+        glPointSize(1.0)
+
         glLineWidth(1.0)
 
 
