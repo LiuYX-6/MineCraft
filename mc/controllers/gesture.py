@@ -76,7 +76,7 @@ _ROTATION_GESTURE_CODE: Tuple[int, int, int, int, int] = (1, 1, 0, 0, 0)
 _MOVEMENT_GESTURE_CODE: Tuple[int, int, int, int, int] = (1, 1, 0, 0, 1)
 
 # Anchor-delta tuning parameters.
-_ANCHOR_DEAD_ZONE = 0.015   # minimal dead zone around anchor (anti-jitter)
+_ANCHOR_DEAD_ZONE = 0.025   # minimal dead zone around anchor (anti-jitter)
 _ANCHOR_MAX_DELTA = 0.25    # 25 % of frame width → full deflection
 
 # Maximum rotation speed (degrees per tick) at full deflection.
@@ -84,6 +84,26 @@ _ROTATION_SPEED = 3.0
 
 # Landmark index used for position tracking.
 _INDEX_TIP = 8
+
+# ---------------------------------------------------------------------------
+# Hand topology + colours for camera preview overlay (BGR).
+# ---------------------------------------------------------------------------
+_HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17),
+]
+
+_LM_COLORS = [
+    (240, 240, 240), (255, 180, 180), (255, 140, 140), (255, 100, 100), (255,  60,  60),
+    (180, 255, 180), (140, 255, 140), (100, 255, 100), ( 60, 255,  60),
+    (180, 180, 255), (140, 140, 255), (100, 100, 255), ( 60,  60, 255),
+    (255, 180, 255), (255, 140, 255), (255, 100, 255), (255,  60, 255),
+    (255, 255, 180), (255, 255, 140), (255, 255, 100), (255, 255,  60),
+]
 
 
 class GestureController(PlayerController):
@@ -146,6 +166,9 @@ class GestureController(PlayerController):
         have thread-affinity requirements).  Pushes the latest raw
         ``finger_states`` into ``_latest_finger_states`` under a lock so
         the main thread can read it without blocking.
+
+        Also opens an OpenCV preview window showing the camera feed with
+        hand landmarks and the current control state overlaid.
         """
         try:
             import cv2
@@ -168,6 +191,13 @@ class GestureController(PlayerController):
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
+        # Per-thread preview state (mirrors main-thread logic for drawing).
+        preview_mode: Optional[str] = None
+        preview_anchor: Optional[Tuple[float, float]] = None
+
+        # Preview window name includes process ID so it doesn't clash.
+        _PREVIEW_WIN = 'Camera — Hand Gesture'
+
         while self._running:
             ret, frame = self._cap.read()
             if not ret:
@@ -183,8 +213,113 @@ class GestureController(PlayerController):
                 else:
                     self._latest_landmarks = None
 
+            # --- Draw preview overlay on the BGR frame --------------------
+            h, w = frame.shape[:2]
+
+            if result.has_hand and result.hand_landmarks:
+                landmarks = result.hand_landmarks[0]
+
+                # Connections.
+                for a_idx, b_idx in _HAND_CONNECTIONS:
+                    ax = int(landmarks[a_idx][0] * w)
+                    ay = int(landmarks[a_idx][1] * h)
+                    bx = int(landmarks[b_idx][0] * w)
+                    by = int(landmarks[b_idx][1] * h)
+                    cv2.line(frame, (ax, ay), (bx, by),
+                             (255, 255, 255), 2)
+
+                # Landmark dots.
+                for i, (lx, ly, _) in enumerate(landmarks):
+                    px, py = int(lx * w), int(ly * h)
+                    cv2.circle(frame, (px, py), 4, _LM_COLORS[i], -1)
+
+                # --- Gesture-gated visual overlay -------------------------
+                fs = result.finger_states
+                if fs is not None:
+                    code = tuple(1 if ext else 0 for ext in fs)
+                    if code == _ROTATION_GESTURE_CODE:
+                        if preview_mode != 'rotation':
+                            preview_mode = 'rotation'
+                            preview_anchor = (
+                                landmarks[_INDEX_TIP][0],
+                                landmarks[_INDEX_TIP][1],
+                            )
+                    elif code == _MOVEMENT_GESTURE_CODE:
+                        if preview_mode != 'movement':
+                            preview_mode = 'movement'
+                            preview_anchor = (
+                                landmarks[_INDEX_TIP][0],
+                                landmarks[_INDEX_TIP][1],
+                            )
+                    else:
+                        preview_mode = None
+                        preview_anchor = None
+
+                    # Draw anchor + displacement arrow.
+                    ix = int(landmarks[_INDEX_TIP][0] * w)
+                    iy = int(landmarks[_INDEX_TIP][1] * h)
+                    if preview_anchor is not None and preview_mode is not None:
+                        ax = int(preview_anchor[0] * w)
+                        ay = int(preview_anchor[1] * h)
+                        # Dead-zone ring (green).
+                        dz_r = int(w * _ANCHOR_DEAD_ZONE)
+                        cv2.circle(frame, (ax, ay), dz_r,
+                                   (0, 180, 0), 1, cv2.LINE_AA)
+                        # Max-range ring (grey).
+                        mr_r = int(w * _ANCHOR_MAX_DELTA)
+                        cv2.circle(frame, (ax, ay), mr_r,
+                                   (100, 100, 100), 1, cv2.LINE_AA)
+                        # Anchor cross (yellow).
+                        ch = 10
+                        cv2.line(frame, (ax - ch, ay), (ax + ch, ay),
+                                 (0, 220, 220), 2, cv2.LINE_AA)
+                        cv2.line(frame, (ax, ay - ch), (ax, ay + ch),
+                                 (0, 220, 220), 2, cv2.LINE_AA)
+                        # Arrow from anchor to current fingertip.
+                        arr_color = (
+                            (255, 200, 0) if preview_mode == 'rotation'
+                            else (0, 140, 255)
+                        )
+                        cv2.arrowedLine(
+                            frame, (ax, ay), (ix, iy), arr_color,
+                            2, cv2.LINE_AA, tipLength=0.15,
+                        )
+                    # Current fingertip dot (red).
+                    cv2.circle(frame, (ix, iy), 6, (0, 50, 200), -1)
+                    cv2.circle(frame, (ix, iy), 6, (255, 255, 255), 2)
+
+                    # --- Top-left HUD text ---
+                    gesture_name = result.gesture or '--'
+                    code_str = ''.join(str(d) for d in code) if fs else '-----'
+                    cv2.putText(
+                        frame, f'{gesture_name}  [{code_str}]',
+                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65, (255, 255, 255), 2, cv2.LINE_AA,
+                    )
+                    mode_label = (
+                        f'Mode: {preview_mode.upper()}' if preview_mode
+                        else 'Mode: --'
+                    )
+                    mode_color = (
+                        (255, 200, 0) if preview_mode == 'rotation'
+                        else (0, 140, 255) if preview_mode == 'movement'
+                        else (128, 128, 128)
+                    )
+                    cv2.putText(
+                        frame, mode_label,
+                        (10, 54), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, mode_color, 2, cv2.LINE_AA,
+                    )
+
+            # Show the frame.
+            cv2.imshow(_PREVIEW_WIN, frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self._running = False
+                break
+
         self._cap.release()
         self._detector.close()
+        cv2.destroyWindow(_PREVIEW_WIN)
 
     # ------------------------------------------------------------------
     # PlayerController interface
