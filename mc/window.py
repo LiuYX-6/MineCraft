@@ -31,12 +31,15 @@ class GameWindow(pyglet.window.Window):
                  controller=None,
                  world=None,
                  player=None,
+                 gesture_controller=None,
                  **kwargs):
         super(GameWindow, self).__init__(*args, **kwargs)
 
         # ---- Component composition ----
-        # Accept external instances; use defaults when not provided.
+        # Primary controller: keyboard + mouse (always active).
         self.controller = controller or KeyboardMouseController(self)
+        # Optional gesture controller: camera-based hand-gesture input.
+        self.gesture_controller = gesture_controller
         self.world = world or World(FlatWorldGenerator())
         self.player = player or Player()
 
@@ -56,6 +59,18 @@ class GameWindow(pyglet.window.Window):
         self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
+        # Gesture finger-code label (top-right).
+        self.gesture_label = pyglet.text.Label(
+            '', font_name='Arial', font_size=18,
+            x=self.width - 10, y=self.height - 10,
+            anchor_x='right', anchor_y='top',
+            color=(0, 0, 0, 255))
+        # Gesture action-name label (below finger code).
+        self.gesture_action_label = pyglet.text.Label(
+            '', font_name='Arial', font_size=16,
+            x=self.width - 10, y=self.height - 34,
+            anchor_x='right', anchor_y='top',
+            color=(0, 160, 0, 255))
         # Crosshair reticle (created on first draw or resize).
         self.reticle = None
 
@@ -97,9 +112,13 @@ class GameWindow(pyglet.window.Window):
 
         # 3. Per-frame controller update.
         self.controller.update(dt)
+        if self.gesture_controller is not None:
+            self.gesture_controller.update(dt)
 
-        # 4. Discrete actions (consumed on read by the controller).
+        # 4. Discrete actions (consume on read, merge from both sources).
         actions = self.controller.poll_actions()
+        if self.gesture_controller is not None:
+            actions |= self.gesture_controller.poll_actions()
         self._handle_actions(actions)
 
         # 5. Player physics.
@@ -130,14 +149,14 @@ class GameWindow(pyglet.window.Window):
             elif action == 'place_block':
                 vector = self.player.get_sight_vector()
                 block, previous = self.world.hit_test(
-                    self.player.position, vector)
+                    self.player.position, vector, max_distance=4)
                 if previous:
                     self.world.add_block(previous,
                                          self.player.selected_block)
             elif action == 'break_block':
                 vector = self.player.get_sight_vector()
                 block, _ = self.world.hit_test(
-                    self.player.position, vector)
+                    self.player.position, vector, max_distance=4)
                 if block:
                     texture = self.world.world[block]
                     if texture != STONE:
@@ -159,8 +178,12 @@ class GameWindow(pyglet.window.Window):
     # ------------------------------------------------------------------
 
     def on_resize(self, width, height):
-        """Re-position the HUD label and recreate the reticle."""
+        """Re-position the HUD labels and recreate the reticle."""
         self.label.y = height - 10
+        self.gesture_label.x = width - 10
+        self.gesture_label.y = height - 10
+        self.gesture_action_label.x = width - 10
+        self.gesture_action_label.y = height - 34
         self._create_reticle()
 
     # ------------------------------------------------------------------
@@ -250,12 +273,23 @@ class GameWindow(pyglet.window.Window):
             vl.delete()
 
     def draw_label(self):
-        """Draw the FPS / position / block-count label (top-left)."""
+        """Draw the HUD: FPS / position (top-left) + gesture info (top-right)."""
+        # --- Top-left: FPS + position + block count ---
         x, y, z = self.player.position
         self.label.text = '%02d (%.2f, %.2f, %.2f) %d / %d' % (
             self._fps, x, y, z,
             len(self.world._shown), len(self.world.world))
         self.label.draw()
+
+        # --- Top-right: gesture finger code + action (when active) ---
+        if self.gesture_controller is not None:
+            code = self.gesture_controller.finger_code
+            action = self.gesture_controller.action_display
+            self.gesture_label.text = f'手指: {code}'
+            self.gesture_label.draw()
+            if action:
+                self.gesture_action_label.text = f'操作: {action}'
+                self.gesture_action_label.draw()
 
     def _create_reticle(self):
         """Create or recreate the crosshair vertex list."""
@@ -304,9 +338,27 @@ def setup(shader):
 
 
 def run():
-    """Convenience entry point: create a window and start the game loop."""
+    """Convenience entry point: create a window and start the game loop.
+
+    Command-line flags
+    ------------------
+    ``--gesture``
+        Enable camera-based hand-gesture input **in addition** to the
+        default keyboard + mouse controller.  Both input sources are
+        active simultaneously.
+    """
+    import sys
+
+    gesture_controller = None
+    if '--gesture' in sys.argv:
+        from mc.controllers.gesture import GestureController
+        gesture_controller = GestureController()
+
     window = GameWindow(width=800, height=600, caption='Minecraft',
-                        resizable=True)
+                        resizable=True,
+                        gesture_controller=gesture_controller)
     window.controller.activate()
+    if gesture_controller is not None:
+        gesture_controller.activate()
     setup(window.world.shader)
     pyglet.app.run()

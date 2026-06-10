@@ -117,8 +117,17 @@ def _draw_hud(
 # main
 # ===========================================================================
 
-def main() -> None:
-    """Run the gesture detection demo loop."""
+def main(rotate_camera: bool = False) -> None:
+    """Run the gesture detection demo loop.
+
+    Parameters
+    ----------
+    rotate_camera : bool
+        If ``True``, rotate the camera image 90° counter-clockwise before
+        detection.  The displayed window also shows the rotated image, but
+        the HUD overlay (gesture name, finger states) is drawn in the
+        normal upright orientation on top of it.
+    """
 
     # -- delayed OpenCV import so the module is importable without it -----
     global cv2
@@ -151,6 +160,8 @@ def main() -> None:
     )
 
     print('Gesture demo started. Press Q to quit.')
+    if rotate_camera:
+        print('Camera rotation: 90° CCW')
 
     try:
         while True:
@@ -158,6 +169,10 @@ def main() -> None:
             if not ret:
                 print('WARNING: Failed to read frame from camera.')
                 break
+
+            # Optionally rotate the display frame 90° CCW.
+            if rotate_camera:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
             # MediaPipe requires RGB; OpenCV gives BGR.
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -169,7 +184,7 @@ def main() -> None:
             for landmarks in result.hand_landmarks:
                 _draw_landmarks(frame, landmarks, h, w)
 
-            # HUD overlay.
+            # HUD overlay (drawn upright — the text is never rotated).
             _draw_hud(frame, result.gesture, result.finger_states)
 
             # Show.
@@ -187,4 +202,5 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    main()
+    rotate = '--rotate' in sys.argv or '-r' in sys.argv
+    main(rotate_camera=rotate)
