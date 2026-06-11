@@ -41,6 +41,7 @@ class PlayerController(ABC):
         * ``'escape'`` — release mouse / exit
         * ``'slot_0'`` … ``'slot_9'`` — switch hotbar slot
         * ``'pick_block'`` — pick the focused block type (middle-click)
+        * ``'slot_next'`` — cycle to the next hotbar slot
         """
         ...
 
@@ -66,3 +67,4 @@ class PlayerController(ABC):
 # import PlayerController from this __init__).
 from mc.controllers.keyboard_mouse import KeyboardMouseController  # noqa: E402
 from mc.controllers.gesture import GestureController  # noqa: E402
+from mc.controllers.voice import VoiceController  # noqa: E402

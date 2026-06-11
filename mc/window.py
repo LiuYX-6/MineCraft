@@ -33,6 +33,7 @@ class GameWindow(pyglet.window.Window):
                  world=None,
                  player=None,
                  gesture_controller=None,
+                 voice_controller=None,
                  **kwargs):
         super(GameWindow, self).__init__(*args, **kwargs)
 
@@ -41,6 +42,8 @@ class GameWindow(pyglet.window.Window):
         self.controller = controller or KeyboardMouseController(self)
         # Optional gesture controller: camera-based hand-gesture input.
         self.gesture_controller = gesture_controller
+        # Optional voice controller: microphone-based speech input.
+        self.voice_controller = voice_controller
         self.world = world or World(FlatWorldGenerator())
         self.player = player or Player()
 
@@ -72,6 +75,18 @@ class GameWindow(pyglet.window.Window):
             x=self.width - 10, y=self.height - 34,
             anchor_x='right', anchor_y='top',
             color=(0, 160, 0, 255))
+        # Voice status label (left side, below FPS/position).
+        self.voice_label = pyglet.text.Label(
+            '', font_name='Arial', font_size=14,
+            x=10, y=self.height - 44,
+            anchor_x='left', anchor_y='top',
+            color=(100, 100, 255, 255))
+        # Voice last-command label (below status).
+        self.voice_command_label = pyglet.text.Label(
+            '', font_name='Arial', font_size=14,
+            x=10, y=self.height - 62,
+            anchor_x='left', anchor_y='top',
+            color=(160, 100, 255, 255))
         # Crosshair reticle (created on first draw or resize).
         self.reticle = None
 
@@ -115,27 +130,38 @@ class GameWindow(pyglet.window.Window):
         self.controller.update(dt)
         if self.gesture_controller is not None:
             self.gesture_controller.update(dt)
+        if self.voice_controller is not None:
+            self.voice_controller.update(dt)
 
-        # 4. Discrete actions (consume on read, merge from both sources).
+        # 4. Discrete actions (consume on read, merge from all sources).
         actions = self.controller.poll_actions()
         if self.gesture_controller is not None:
             actions |= self.gesture_controller.poll_actions()
+        if self.voice_controller is not None:
+            actions |= self.voice_controller.poll_actions()
         self._handle_actions(actions)
 
-        # 5. Player physics — merge keyboard + gesture movement.
+        # 5. Player physics — merge keyboard + gesture + voice movement.
         strafe = self.controller.get_strafe()
         if self.gesture_controller is not None:
             gs = self.gesture_controller.get_strafe()
             strafe = (strafe[0] + gs[0], strafe[1] + gs[1])
+        if self.voice_controller is not None:
+            vs = self.voice_controller.get_strafe()
+            strafe = (strafe[0] + vs[0], strafe[1] + vs[1])
         self.player.update_physics(dt, self.world.world, strafe,
                                     flying=self.player.flying)
 
-        # 6. Camera rotation — merge keyboard/mouse + gesture rotation.
+        # 6. Camera rotation — merge keyboard/mouse + gesture + voice rotation.
         dy, dp = self.controller.get_rotation_delta()
         if self.gesture_controller is not None:
             gdy, gdp = self.gesture_controller.get_rotation_delta()
             dy += gdy
             dp += gdp
+        if self.voice_controller is not None:
+            vdy, vdp = self.voice_controller.get_rotation_delta()
+            dy += vdy
+            dp += vdp
         if dy or dp:
             x, y = self.player.rotation
             x, y = x + dy, y + dp
@@ -180,6 +206,9 @@ class GameWindow(pyglet.window.Window):
             elif action.startswith('slot_'):
                 index = int(action.split('_')[1])
                 self.player.switch_slot(index)
+            elif action == 'slot_next':
+                next_slot = (self.player.selected_block_index + 1) % len(self.player.inventory)
+                self.player.switch_slot(next_slot)
 
     # ------------------------------------------------------------------
     # Window events
@@ -192,6 +221,8 @@ class GameWindow(pyglet.window.Window):
         self.gesture_label.y = height - 10
         self.gesture_action_label.x = width - 10
         self.gesture_action_label.y = height - 34
+        self.voice_label.y = height - 44
+        self.voice_command_label.y = height - 62
         self._create_reticle()
 
     # ------------------------------------------------------------------
@@ -282,7 +313,8 @@ class GameWindow(pyglet.window.Window):
             vl.delete()
 
     def draw_label(self):
-        """Draw the HUD: FPS / position (top-left) + gesture info (top-right)."""
+        """Draw the HUD: FPS / position (top-left) + gesture info (top-right)
+        + voice info (top-left below FPS)."""
         # --- Top-left: FPS + position + block count ---
         x, y, z = self.player.position
         self.label.text = '%02d (%.2f, %.2f, %.2f) %d / %d' % (
@@ -299,6 +331,18 @@ class GameWindow(pyglet.window.Window):
             if action:
                 self.gesture_action_label.text = f'操作: {action}'
                 self.gesture_action_label.draw()
+
+        # --- Top-left (below FPS): voice status (when active) ---
+        if self.voice_controller is not None:
+            vc = self.voice_controller
+            # Listening indicator
+            indicator = '🎤' if vc.is_listening else '⏸'
+            self.voice_label.text = f'{indicator} {vc.status_text}'
+            self.voice_label.draw()
+            # Last recognised command
+            if vc.last_command:
+                self.voice_command_label.text = f'识别: "{vc.last_command}"'
+                self.voice_command_label.draw()
 
     def _create_reticle(self):
         """Create or recreate the crosshair vertex list."""
@@ -465,6 +509,11 @@ def run():
         Enable camera-based hand-gesture input **in addition** to the
         default keyboard + mouse controller.  Both input sources are
         active simultaneously.
+    ``--voice``
+        Enable microphone-based voice-command input **in addition** to
+        the default keyboard + mouse controller.  All three input
+        sources (keyboard/mouse, gesture, voice) are active simultaneously
+        when both ``--gesture`` and ``--voice`` are specified.
     """
     import sys
 
@@ -473,11 +522,19 @@ def run():
         from mc.controllers.gesture import GestureController
         gesture_controller = GestureController()
 
+    voice_controller = None
+    if '--voice' in sys.argv:
+        from mc.controllers.voice import VoiceController
+        voice_controller = VoiceController()
+
     window = GameWindow(width=800, height=600, caption='Minecraft',
                         resizable=True,
-                        gesture_controller=gesture_controller)
+                        gesture_controller=gesture_controller,
+                        voice_controller=voice_controller)
     window.controller.activate()
     if gesture_controller is not None:
         gesture_controller.activate()
+    if voice_controller is not None:
+        voice_controller.activate()
     setup(window.world.shader)
     pyglet.app.run()

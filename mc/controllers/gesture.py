@@ -198,6 +198,10 @@ class GestureController(PlayerController):
         # Preview window name includes process ID so it doesn't clash.
         _PREVIEW_WIN = 'Camera — Hand Gesture'
 
+        # Create the preview window and keep it on top of the game window.
+        cv2.namedWindow(_PREVIEW_WIN, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(_PREVIEW_WIN, cv2.WND_PROP_TOPMOST, 1)
+
         while self._running:
             ret, frame = self._cap.read()
             if not ret:
